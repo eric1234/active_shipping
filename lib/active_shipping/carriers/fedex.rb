@@ -220,6 +220,8 @@ module ActiveShipping
               end
             end
 
+            options[:customs].call xml if options[:customs]
+
             xml.LabelSpecification do
               xml.LabelFormatType('COMMON2D')
               xml.ImageType(options[:label_format] || 'PNG')
