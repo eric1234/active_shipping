@@ -137,7 +137,7 @@ module ActiveShipping
     DEFAULT_LABEL_STOCK_TYPE = 'PAPER_7X4.75'
 
     # Available return formats for image data when creating labels
-    LABEL_FORMATS = ['DPL', 'EPL2', 'PDF', 'ZPLII', 'PNG'] 
+    LABEL_FORMATS = ['DPL', 'EPL2', 'PDF', 'ZPLII', 'PNG']
 
     def self.service_name_for_code(service_code)
       SERVICE_TYPES[service_code] || "FedEx #{service_code.titleize.sub(/Fedex /, '')}"
@@ -220,6 +220,10 @@ module ActiveShipping
               end
             end
 
+            xml.SpecialServicesRequested do
+              build_notification_nodes(xml, options[:notification]) if options[:notification]
+            end
+
             options[:customs].call xml if options[:customs]
 
             xml.LabelSpecification do
@@ -260,6 +264,28 @@ module ActiveShipping
         end
       end
       xml_builder.to_xml
+    end
+
+    def build_notification_nodes(xml, notification)
+      fmt = ->(option) { option.to_s.upcase }
+
+      xml.SpecialServiceTypes('EMAIL_NOTIFICATION')
+
+      xml.EMailNotificationDetail do
+        xml.PersonalMessage notification.personal_message if notification.personal_message
+        xml.Recipients do
+          for recipient in notification.recipients
+            xml.EMailNotificationRecipientType(fmt[recipient.type])
+            xml.EMailAddress(recipient.email)
+            xml.NotificationEventsRequested("ON_#{fmt[recipient.event_type]}")
+            xml.Format(fmt[recipient.format])
+            xml.Localization do
+              xml.LanguageCode
+            end
+          end
+        end
+        xml.EMailNotificationAggregationType "PER_#{fmt[notification.aggregation_type]}" if notification.aggregation_type
+      end
     end
 
     def build_contact_address_nodes(xml, location)

@@ -589,6 +589,35 @@ class FedExTest < Minitest::Test
     assert_equal result.search('SpecialServicesRequested/SignatureOptionDetail').text.strip, "INDIRECT"
   end
 
+  def test_create_shipment_with_notification
+    recipient = ActiveShipping::Notification::Recipient.new
+    recipient.email = 'joe@example.com'
+    recipient.type = :broker
+    recipient.event_type = :shipment
+    recipient.format = :text
+
+    notification = ActiveShipping::Notification.new
+    notification.personal_message = 'Hi Joe!'
+    notification.aggregation_type = :shipment
+    notification.recipients << recipient
+
+    result = Nokogiri::XML(@carrier.send(:build_shipment_request,
+                                         location_fixtures[:beverly_hills],
+                                         location_fixtures[:annapolis],
+                                         package_fixtures.values_at(:chocolate_stuff),
+                                         :test => true, notification: notification))
+
+
+
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/SpecialServiceTypes').text, 'EMAIL_NOTIFICATION'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/PersonalMessage').text, 'Hi Joe!'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/EMailNotificationAggregationType').text, 'PER_SHIPMENT'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/Recipients/EMailNotificationRecipientType').text, 'BROKER'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/Recipients/EMailAddress').text, 'joe@example.com'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/Recipients/NotificationEventsRequested').text, 'ON_SHIPMENT'
+    assert_equal result.search('RequestedShipment/SpecialServicesRequested/EMailNotificationDetail/Recipients/Format').text, 'TEXT'
+  end
+
   def test_create_shipment_reference
     packages = package_fixtures.values_at(:wii)
     packages.each {|p| p.options[:reference_numbers] = [{:value => "FOO-123"}] }
