@@ -1,6 +1,6 @@
 require 'test_helper'
 
-class UPSTest < Minitest::Test
+class UPSTest < ActiveSupport::TestCase
   include ActiveShipping::Test::Fixtures
 
   def setup
@@ -166,6 +166,13 @@ class UPSTest < Minitest::Test
     assert_equal Time.parse('2015-01-29 00:00:00 UTC'), response.scheduled_delivery_date
   end
 
+  def test_find_tracking_info_should_handle_no_status_node
+    @carrier.expects(:commit).returns(xml_fixture('ups/no_status_node_success'))
+    response = @carrier.find_tracking_info('1Z5FX0076803466397')
+    assert_equal 'Success', response.params.fetch("Response").fetch("ResponseStatusDescription")
+    assert_empty response.shipment_events
+  end
+
   def test_response_parsing_an_oversize_package
     mock_response = xml_fixture('ups/package_exceeds_maximum_length')
     @carrier.expects(:commit).returns(mock_response)
@@ -177,6 +184,38 @@ class UPSTest < Minitest::Test
     end
 
     assert_equal "Failure: Package exceeds the maximum length constraint of 108 inches. Length is the longest side of a package.", e.message
+  end
+
+  def test_handles_no_shipment_warning_messages
+    mock_response = xml_fixture('ups/no_shipment_warnings')
+    @carrier.expects(:commit).returns(mock_response)
+    response = @carrier.find_rates(location_fixtures[:beverly_hills],
+                        location_fixtures[:real_home_as_residential],
+                        package_fixtures.values_at(:chocolate_stuff))
+    rate = response.rates.first
+    assert_equal [], rate.messages
+  end
+
+  def test_handles_warning_messages
+    mock_response = xml_fixture('ups/no_negotiated_rates')
+    @carrier.expects(:commit).returns(mock_response)
+    response = @carrier.find_rates(location_fixtures[:beverly_hills],
+                        location_fixtures[:real_home_as_residential],
+                        package_fixtures.values_at(:chocolate_stuff))
+    rate = response.rates.first
+    expected_messages = [
+      "User Id and Shipper Number combination is not qualified to receive negotiated rates.",
+      "Your invoice may vary from the displayed reference rates",
+      "Ship To Address Classification is changed from Residential to Commercial"
+    ]
+    assert_equal expected_messages, rate.messages
+  end
+
+  def test_response_parsing_an_undecoded_character
+    unencoded_response = @tracking_response.gsub('NAPERVILLE', "N\xc4PERVILLE")
+    @carrier.stubs(:ssl_post).returns(unencoded_response)
+    response = @carrier.find_tracking_info('1Z5FX0076803466397')
+    assert_equal 'NÄPERVILLE', response.shipment_events.first.location.city
   end
 
   def test_response_parsing_an_unknown_error
@@ -527,7 +566,7 @@ class UPSTest < Minitest::Test
     )
 
     response.delivery_estimates.each do |delivery_estimate|
-      assert delivery_estimate.service_name, UPS::DEFAULT_SERVICES[delivery_estimate.service_code]
+      assert_equal delivery_estimate.service_code, UPS::DEFAULT_SERVICE_NAME_TO_CODE[delivery_estimate.service_name]
     end
   end
 
@@ -589,4 +628,32 @@ class UPSTest < Minitest::Test
     assert_equal 'OZS', request.search('/Package/PackageWeight/UnitOfMeasurement/Code').text
     assert_equal '8.0', request.search('/Package/PackageWeight/Weight').text
   end
+
+  def test_address_validation
+    location = Location.new(address1: "55 Glenlake Parkway", city: "Atlanta", state: "GA", zip: "30328", country: "US")
+    address_validation_response = xml_fixture('ups/address_validation_response')
+    @carrier.expects(:commit).returns(address_validation_response)
+    response = @carrier.validate_address(location)
+    assert_equal :commercial, response.classification
+    assert_equal true, response.address_match?
+  end
+
+  def test_address_validation_ambiguous
+    location = Location.new(address1: "55 Glen", city: "Atlanta", state: "GA", zip: "30328", country: "US")
+    address_validation_response = xml_fixture('ups/address_validation_response_ambiguous')
+    @carrier.expects(:commit).returns(address_validation_response)
+    response = @carrier.validate_address(location)
+    assert_equal false, response.address_match?
+    assert_equal :ambiguous, response.validity
+  end
+
+  def test_address_validation_no_candidates
+    location = Location.new(address1: "55 Glenblagahrhadd", city: "Atlanta", state: "GA", zip: "30321", country: "US")
+    address_validation_response = xml_fixture('ups/address_validation_response_no_candidates')
+    @carrier.expects(:commit).returns(address_validation_response)
+    response = @carrier.validate_address(location)
+    assert_equal false, response.address_match?
+    assert_equal :invalid, response.validity
+  end
+
 end
