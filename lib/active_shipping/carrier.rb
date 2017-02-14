@@ -1,9 +1,9 @@
 module ActiveShipping
 
-  # Carrier is abstract the base class for all supported carriers.
+  # Carrier is the abstract base class for all supported carriers.
   #
   # To implement support for a carrier, you should subclass this class and
-  # implement all the methods the carrier supports.
+  # implement all the methods that the carrier supports.
   #
   # @see #find_rates
   # @see #create_shipment
@@ -18,8 +18,6 @@ module ActiveShipping
   #   The last request performed against the carrier's API.
   #   @see #save_request
   class Carrier
-    include Quantified
-
     attr_reader :last_request
     attr_accessor :test_mode
     alias_method :test_mode?, :test_mode
@@ -94,9 +92,19 @@ module ActiveShipping
       raise NotImplementedError, "#find_tracking_info is not supported by #{self.class.name}."
     end
 
+    # Get a list of services available for the a specific route
+    #
+    # @param origin_country_code [String] The country of origin
+    # @param destination_country_code [String] The destination country
+    # @return [Array<String>] A list of names of the available services
+    #
+    def available_services(origin_country_code, destination_country_code, options = {})
+      raise NotImplementedError, "#available_services is not supported by #{self.class.name}."
+    end
+
     # Validate credentials with a call to the API.
     #
-    # By default this just does a `find_rates` call with the orgin and destination both as
+    # By default this just does a `find_rates` call with the origin and destination both as
     # the carrier's default_location. Override to provide alternate functionality, such as
     # checking for `test_mode` to use test servers, etc.
     #
@@ -112,9 +120,9 @@ module ActiveShipping
     end
 
     # The maximum weight the carrier will accept.
-    # @return [Quantified::Mass]
+    # @return [Measured::Weight]
     def maximum_weight
-      Mass.new(150, :pounds)
+      Measured::Weight.new(150, :pounds)
     end
 
     # The address field maximum length accepted by the carrier
@@ -155,7 +163,7 @@ module ActiveShipping
       @last_request = r
     end
 
-    # Calculates a timestamp that corresponds a given number if business days in the future
+    # Calculates a timestamp that corresponds a given number of business days in the future
     #
     # @param days [Integer] The number of business days from now.
     # @return [DateTime] A timestamp, the provided number of business days in the future.

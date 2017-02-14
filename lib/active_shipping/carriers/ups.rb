@@ -1,5 +1,3 @@
-# -*- encoding: utf-8 -*-
-
 module ActiveShipping
   class UPS < Carrier
     self.retry_safe = true
@@ -18,7 +16,8 @@ module ActiveShipping
       :ship_confirm => 'ups.app/xml/ShipConfirm',
       :ship_accept => 'ups.app/xml/ShipAccept',
       :delivery_dates =>  'ups.app/xml/TimeInTransit',
-      :void =>  'ups.app/xml/Void'
+      :void =>  'ups.app/xml/Void',
+      :validate_address => 'ups.app/xml/XAV'
     }
 
     PICKUP_CODES = HashWithIndifferentAccess.new(
@@ -232,6 +231,21 @@ module ActiveShipping
       35
     end
 
+    # Validates a location with the Street Level Validation service
+    #
+    # @param location [Location] The Location to validate
+    # @return [ActiveShipping::AddressValidationResponse] The response from the validation endpoint. This
+    #   response will determine if the given address is valid or not, its commercial/residential classification,
+    #   and the cleaned-up address and/or potential candidate addresses if the passed location can't be found
+    def validate_address(location, options = {})
+      location = upsified_location(location)
+      options = @options.merge(options)
+      access_request = build_access_request
+      address_validation_request = build_address_validation_request(location, options)
+      response = commit(:validate_address, save_request(access_request + address_validation_request), options[:test])
+      parse_address_validation_response(location, response, options)
+    end
+
     protected
 
     def upsified_location(location)
@@ -257,6 +271,25 @@ module ActiveShipping
       xml_builder.to_xml
     end
 
+    # Builds an XML node to request UPS shipping rates for the given packages
+    #
+    # @param origin [ActiveShipping::Location] Where the shipment will originate from
+    # @param destination [ActiveShipping::Location] Where the package will go
+    # @param packages [Array<ActiveShipping::Package>] The list of packages that will
+    #   be in the shipment
+    # @options options [Hash] rate-specific options
+    # @return [ActiveShipping::RateResponse] The response from the UPS, which
+    #   includes 0 or more rate estimates for different shipping products
+    #
+    # options:
+    # * service: name of the service
+    # * pickup_type: symbol for PICKUP_CODES
+    # * customer_classification: symbol for CUSTOMER_CLASSIFICATIONS
+    # * shipper: who is sending the package and where it should be returned
+    #     if it is undeliverable.
+    # * imperial: if truthy, measurements will use the metric system
+    # * negotiated_rates: if truthy, negotiated rates will be requested from
+    #     UPS. Only valid if shipper account has negotiated rates.
     def build_rate_request(origin, destination, packages, options = {})
       xml_builder = Nokogiri::XML::Builder.new do |xml|
         xml.RatingServiceSelectionRequest do
@@ -784,6 +817,7 @@ module ActiveShipping
           service_code = rated_shipment.at('Service/Code').text
           days_to_delivery = rated_shipment.at('GuaranteedDaysToDelivery').text.to_i
           days_to_delivery = nil if days_to_delivery == 0
+          warning_messages = rate_warning_messages(rated_shipment)
           RateEstimate.new(origin, destination, @@name, service_name_for(origin, service_code),
               :total_price => rated_shipment.at('TotalCharges/MonetaryValue').text.to_f,
               :insurance_price => rated_shipment.at('ServiceOptionsCharges/MonetaryValue').text.to_f,
@@ -791,7 +825,8 @@ module ActiveShipping
               :service_code => service_code,
               :packages => packages,
               :delivery_range => [timestamp_from_business_day(days_to_delivery)],
-              :negotiated_rate => rated_shipment.at('NegotiatedRates/NetSummaryCharges/GrandTotal/MonetaryValue').try(:text).to_f
+              :negotiated_rate => rated_shipment.at('NegotiatedRates/NetSummaryCharges/GrandTotal/MonetaryValue').try(:text).to_f,
+              :messages => warning_messages
           )
         end
       end
@@ -816,16 +851,18 @@ module ActiveShipping
         # Build status hash
         status_nodes = first_package.css('Activity > Status > StatusType')
 
-        # Prefer a delivery node
-        status_node = status_nodes.detect { |x| x.at('Code').text == 'D' }
-        status_node ||= status_nodes.first
+        if status_nodes.present?
+          # Prefer a delivery node
+          status_node = status_nodes.detect { |x| x.at('Code').text == 'D' }
+          status_node ||= status_nodes.first
 
-        status_code = status_node.at('Code').text
-        status_description = status_node.at('Description').text
-        status = TRACKING_STATUS_CODES[status_code]
+          status_code = status_node.at('Code').try(:text)
+          status_description = status_node.at('Description').try(:text)
+          status = TRACKING_STATUS_CODES[status_code]
 
-        if status_description =~ /out.*delivery/i
-          status = :out_for_delivery
+          if status_description =~ /out.*delivery/i
+            status = :out_for_delivery
+          end
         end
 
         origin, destination = %w(Shipper ShipTo).map do |location|
@@ -848,8 +885,8 @@ module ActiveShipping
         activities = first_package.css('> Activity')
         unless activities.empty?
           shipment_events = activities.map do |activity|
-            description = activity.at('Status/StatusType/Description').text
-            type_code = activity.at('Status/StatusType/Code').text
+            description = activity.at('Status/StatusType/Description').try(:text)
+            type_code = activity.at('Status/StatusType/Code').try(:text)
             zoneless_time = parse_ups_datetime(:time => activity.at('Time'), :date => activity.at('Date'))
             location = location_from_address_node(activity.at('ActivityLocation/Address'))
             ShipmentEvent.new(description, zoneless_time, location, description, type_code)
@@ -940,6 +977,97 @@ module ActiveShipping
       end
     end
 
+    def build_address_validation_request(location, options = {})
+      xml_builder = Nokogiri::XML::Builder.new do |xml|
+        xml.AddressValidationRequest do
+          xml.Request do
+            xml.RequestAction('XAV')
+            xml.RequestOption('3')
+
+            if options[:customer_context]
+              xml.TransactionReference do
+                xml.CustomerContext(options[:customer_context])
+                xml.XpciVersion("1.0")
+              end
+            end
+          end
+
+          xml.AddressKeyFormat do
+            xml.AddressLine(location.address1)
+            if location.address2.present?
+              xml.AddressLine(location.address2)
+            end
+            xml.PoliticalDivision2(location.city)
+            xml.PoliticalDivision1(location.state)
+            xml.PostcodePrimaryLow(location.postal_code)
+            xml.CountryCode(location.country_code)
+          end
+        end
+      end
+
+      xml_builder.to_xml
+    end
+
+    def parse_address_validation_response(address, response, options={})
+      xml     = build_document(response, 'AddressValidationResponse')
+      success = response_success?(xml)
+      message = response_message(xml)
+
+      validity = nil
+      classification_code = nil
+      classification_description = nil
+      addresses = []
+
+      if success
+        if xml.at('AddressClassification/Code').present?
+          classification_code = xml.at('AddressClassification/Code').text
+        end
+        
+        classification = case classification_code
+        when "1"
+          :commercial
+        when "2"
+          :residential
+        else
+          :unknown
+        end
+
+        validity = if xml.at("ValidAddressIndicator").present?
+          :valid
+        elsif xml.at("AmbiguousAddressIndicator").present?
+          :ambiguous
+        elsif xml.at("NoCandidatesIndicator").present?
+          :invalid
+        else
+          :unknown
+        end
+
+        addresses = xml.css('AddressKeyFormat').collect { |node| location_from_address_key_format_node(node) }
+      end
+
+      params = Hash.from_xml(response).values.first
+      response = AddressValidationResponse.new(success, message, params, :validity => validity, :classification => classification, :candidate_addresses => addresses, :xml => response, :request => last_request)
+    end
+
+    # Converts from a AddressKeyFormat XML node to a Location
+    def location_from_address_key_format_node(address)
+      return nil unless address
+      country = address.at('CountryCode').try(:text)
+      country = 'US' if country == 'ZZ' # Sometimes returned by SUREPOST in the US
+      
+      address_lines = address.css('AddressLine')
+
+      Location.new(
+        :country     => country,
+        :postal_code => address.at('PostcodePrimaryLow').try(:text),
+        :province    => address.at('PoliticalDivision1').try(:text),
+        :city        => address.at('PoliticalDivision2').try(:text),
+        :address1    => address_lines[0].try(:text),
+        :address2    => address_lines[1].try(:text),
+        :address3    => address_lines[2].try(:text),
+      )
+    end
+
     def location_from_address_node(address)
       return nil unless address
       country = address.at('CountryCode').try(:text)
@@ -977,6 +1105,10 @@ module ActiveShipping
       [status, desc].select(&:present?).join(": ").presence || "UPS could not process the request."
     end
 
+    def rate_warning_messages(rate_xml)
+      rate_xml.xpath("RatedShipmentWarning").map { |warning| warning.text }
+    end
+
     def response_digest(xml)
       xml.root.at('ShipmentDigest').text
     end
@@ -1001,7 +1133,8 @@ module ActiveShipping
     end
 
     def commit(action, request, test = false)
-      ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request)
+      response = ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request)
+      response.encode('utf-8', 'iso-8859-1')
     end
 
     def within_same_area?(origin, location)
