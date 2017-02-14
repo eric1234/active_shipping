@@ -226,6 +226,10 @@ module ActiveShipping
 
             options[:customs].call xml if options[:customs]
 
+            xml.SpecialServicesRequested do
+              build_notification_nodes(xml, options[:notification]) if options[:notification]
+            end
+
             xml.LabelSpecification do
               xml.LabelFormatType('COMMON2D')
               xml.ImageType(options[:label_format] || 'PNG')
@@ -264,6 +268,28 @@ module ActiveShipping
         end
       end
       xml_builder.to_xml
+    end
+
+    def build_notification_nodes(xml, notification)
+      fmt = ->(option) { option.to_s.upcase }
+
+      xml.SpecialServiceTypes('EMAIL_NOTIFICATION')
+
+      xml.EMailNotificationDetail do
+        xml.PersonalMessage notification.personal_message if notification.personal_message
+        xml.Recipients do
+          for recipient in notification.recipients
+            xml.EMailNotificationRecipientType(fmt[recipient.type])
+            xml.EMailAddress(recipient.email)
+            xml.NotificationEventsRequested("ON_#{fmt[recipient.event_type]}")
+            xml.Format(fmt[recipient.format])
+            xml.Localization do
+              xml.LanguageCode
+            end
+          end
+        end
+        xml.EMailNotificationAggregationType "PER_#{fmt[notification.aggregation_type]}" if notification.aggregation_type
+      end
     end
 
     def build_contact_address_nodes(xml, location)
